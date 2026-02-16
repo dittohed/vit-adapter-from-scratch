@@ -290,9 +290,12 @@ class ViTAdapterBackbone(nn.Module):
         pos_embed = self.vit.pos_embed
         if pos_embed is None:
             return torch.zeros(1, (h // self.patch_size) * (w // self.patch_size), self.embed_dim, device=device)
-        pos_embed = pos_embed
+        
+        # Drop [CLS] token, not needed for segmentation
         if pos_embed.shape[1] == self.vit.patch_embed.num_patches + 1:
             pos_embed = pos_embed[:, 1:]
+        
+        # Interpolate classical ViT positional embeddings for higher resolution
         pos_embed = self._resize_pos_embed(pos_embed, h, w)
         return pos_embed.to(device)
 
@@ -321,26 +324,30 @@ class ViTAdapterBackbone(nn.Module):
 
     def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
         b, _, h, w = x.shape
+        
+        # Extract "spatial priors" and flatten to tokens
         sp_feats = self.spm(x)
         sp_tokens, spatial_shapes = self._flatten_spatial(sp_feats)
 
+        # Prepare ViT tokens for transformer blocks
         tokens = self.vit.patch_embed(x)
         pos_embed = self._get_pos_embed(h, w, tokens.device)
         tokens = tokens + pos_embed
         tokens = self.vit.pos_drop(tokens)
 
+        # Backbone-adapter interactions
         start = 0
         for idx, end in enumerate(self.interaction_indexes):
             tokens = self.injectors[idx](tokens, sp_tokens)
             for blk in self.vit.blocks[start : end + 1]:
                 tokens = blk(tokens)
             sp_tokens = self.extractors[idx](sp_tokens, tokens, spatial_shapes)
+
             if idx == len(self.interaction_indexes) - 1 and len(self.extra_extractors) > 0:
                 for extra in self.extra_extractors:
                     sp_tokens = extra(sp_tokens, tokens, spatial_shapes)
-            start = end + 1
 
-        _ = self.vit.norm(tokens)
+            start = end + 1
 
         sp_feats = self._unflatten_spatial(sp_tokens, spatial_shapes)
         c2, c3, c4 = sp_feats
