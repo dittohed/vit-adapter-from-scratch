@@ -1,12 +1,9 @@
-#!/usr/bin/env python3
 import argparse
 import os
-import sys
 from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
-import torch.distributed as dist
 from torch.utils.data import DataLoader
 
 from vit_adapter.datasets.ade20k import ADE20K
@@ -15,7 +12,7 @@ from vit_adapter.models.segmentation_model import SegmentationModel
 from vit_adapter.models.vit_adapter import ViTAdapterBackbone
 from vit_adapter.models.upernet import UperNetHead
 from vit_adapter.models.semantic_fpn import SemanticFPNHead
-from vit_adapter.utils.metrics import compute_miou, fast_hist
+from vit_adapter.utils.metrics import compute_miou, compute_confusion_matrix
 
 try:
     import lightning.pytorch as pl
@@ -37,7 +34,7 @@ def parse_args():
     parser.add_argument("--spm-base-channels", type=int, default=64)
     parser.add_argument("--crop-size", type=int, default=512)
     parser.add_argument("--num-classes", type=int, default=150)
-    parser.add_argument("--decode-head", type=str, default="upernet", choices=["upernet", "semantic_fpn"])
+    parser.add_argument("--decode-head", type=str, default="semantic_fpn", choices=["upernet", "semantic_fpn"])
     parser.add_argument("--decode-channels", type=int, default=256)
     parser.add_argument("--semantic-fpn-dropout", type=float, default=0.0)
 
@@ -237,11 +234,7 @@ class SegLightningModule(pl.LightningModule):
         self.power = power
 
         self.criterion = nn.CrossEntropyLoss(ignore_index=ignore_index)
-        self.register_buffer(
-            "val_hist",
-            torch.zeros((num_classes, num_classes), dtype=torch.int64),
-            persistent=False,
-        )
+        self.val_cm = torch.zeros((num_classes, num_classes), dtype=torch.int64)
 
         self.save_hyperparameters(ignore=["model"])
 
@@ -261,14 +254,12 @@ class SegLightningModule(pl.LightningModule):
         loss = self.criterion(logits, masks)
         self.log("val_loss", loss, prog_bar=False, on_step=False, on_epoch=True, sync_dist=True)
         preds = logits.argmax(dim=1)
-        self.val_hist += fast_hist(preds, masks, self.num_classes, self.ignore_index)
+        self.val_cm += compute_confusion_matrix(preds, masks, self.num_classes, self.ignore_index)
 
     def on_validation_epoch_end(self):
-        if dist.is_available() and dist.is_initialized():
-            dist.all_reduce(self.val_hist, op=dist.ReduceOp.SUM)
-        miou, _ = compute_miou(self.val_hist)
+        miou, _ = compute_miou(self.val_cm)
         self.log("val_miou", miou, prog_bar=True, sync_dist=False)
-        self.val_hist.zero_()
+        self.val_cm.zero_()
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
@@ -317,6 +308,7 @@ def main():
     backbone = ViTAdapterBackbone(
         vit_name=args.vit_name, pretrained=args.vit_pretrained, base_channels=args.spm_base_channels
     )
+
     if args.decode_head == "upernet":
         decode_head = UperNetHead(
             in_channels=backbone.out_channels, channels=args.decode_channels, num_classes=args.num_classes
@@ -324,12 +316,13 @@ def main():
     else:
         decode_head = SemanticFPNHead(
             in_channels=backbone.out_channels,
-            channels=args.decode_channels,
+            fpn_out_channels=args.decode_channels,
+            semantic_out_channels=args.decode_channels // 2,
             num_classes=args.num_classes,
             dropout=args.semantic_fpn_dropout,
         )
+    
     seg_model = SegmentationModel(backbone, decode_head)
-
     lit_model = SegLightningModule(
         model=seg_model,
         num_classes=args.num_classes,

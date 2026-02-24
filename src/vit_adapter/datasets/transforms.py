@@ -1,76 +1,82 @@
-import random
-from typing import Tuple
+from __future__ import annotations
 
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image
 import torch
+from torchvision import tv_tensors
+from torchvision.transforms import InterpolationMode
+import torchvision.transforms.v2 as T
+from torchvision.transforms.v2 import functional as F
 
 
-def _to_tuple(size):
-    if isinstance(size, int):
-        return (size, size)
-    return tuple(size)
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
 class SegmentationTransform:
     def __init__(
         self,
         mode: str,
-        crop_size=512,
-        scale_range=(0.5, 2.0),
-        mean=(0.485, 0.456, 0.406),
-        std=(0.229, 0.224, 0.225),
-        ignore_index=255,
+        crop_size: int = 512,
+        scale_range: tuple[float, float] = (0.5, 2.0),
+        mean: tuple[float, float, float] = IMAGENET_MEAN,
+        std: tuple[float, float, float] = IMAGENET_STD,
+        ignore_index: int = 255,
     ):
+        if mode not in {"train", "val"}:
+            raise ValueError("mode must be 'train' or 'val'")
+
         self.mode = mode
-        self.crop_size = _to_tuple(crop_size)
+        self.crop_size = (crop_size, crop_size)
         self.scale_range = scale_range
-        self.mean = torch.tensor(mean).view(3, 1, 1)
-        self.std = torch.tensor(std).view(3, 1, 1)
         self.ignore_index = ignore_index
 
+        self.crop = T.RandomCrop(
+            size=self.crop_size,
+            pad_if_needed=True,
+            fill={tv_tensors.Image: 0, tv_tensors.Mask: int(ignore_index)},
+        )
+        self.flip = T.RandomHorizontalFlip(p=0.5)
+        self.to_dtype = T.ToDtype(torch.float32, scale=True)
+        self.normalize = T.Normalize(mean=mean, std=std)
+        self.to_pure = T.ToPureTensor()
+
     def __call__(self, img: Image.Image, mask: Image.Image):
+        img_t = F.to_image(img)
+        mask_t = tv_tensors.Mask(mask)
+
         if self.mode == "train":
-            img, mask = self._random_scale(img, mask)
-            img, mask = self._random_crop(img, mask)
-            img, mask = self._random_flip(img, mask)
+            img_t, mask_t = self._random_scale(img_t, mask_t)
+            img_t, mask_t = self.crop(img_t, mask_t)
+            img_t, mask_t = self.flip(img_t, mask_t)
         else:
-            img = img.resize(self.crop_size[::-1], Image.BILINEAR)
-            mask = mask.resize(self.crop_size[::-1], Image.NEAREST)
+            img_t = F.resize(
+                img_t,
+                size=list(self.crop_size),
+                interpolation=InterpolationMode.BILINEAR,
+                antialias=True,
+            )
+            mask_t = F.resize(mask_t, size=list(self.crop_size), interpolation=InterpolationMode.NEAREST)
 
-        img = np.array(img, dtype=np.float32) / 255.0
-        img = torch.from_numpy(img).permute(2, 0, 1)
-        img = (img - self.mean) / self.std
+        img_t = self.normalize(self.to_dtype(img_t))
+        img_t = self.to_pure(img_t)
+        mask_t = self.to_pure(mask_t).to(torch.int64).squeeze(0)
 
-        mask = torch.from_numpy(np.array(mask, dtype=np.int64))
-        return img, mask
+        return img_t, mask_t
 
-    def _random_scale(self, img: Image.Image, mask: Image.Image):
-        scale = random.uniform(*self.scale_range)
-        new_w = max(1, int(round(img.width * scale)))
-        new_h = max(1, int(round(img.height * scale)))
-        img = img.resize((new_w, new_h), Image.BILINEAR)
-        mask = mask.resize((new_w, new_h), Image.NEAREST)
-        return img, mask
+    def _random_scale(self, img: tv_tensors.Image, mask: tv_tensors.Mask):
+        min_s, max_s = self.scale_range
+        scale = float(torch.empty(()).uniform_(min_s, max_s))
+        h, w = int(img.shape[-2]), int(img.shape[-1])
+        new_h = int(round(h * scale))
+        new_w = int(round(w * scale))
 
-    def _random_crop(self, img: Image.Image, mask: Image.Image):
-        crop_h, crop_w = self.crop_size
-        pad_h = max(crop_h - img.height, 0)
-        pad_w = max(crop_w - img.width, 0)
-        if pad_h > 0 or pad_w > 0:
-            img = ImageOps.expand(img, border=(0, 0, pad_w, pad_h), fill=0)
-            mask = ImageOps.expand(mask, border=(0, 0, pad_w, pad_h), fill=self.ignore_index)
+        img = F.resize(
+            img,
+            size=[new_h, new_w],
+            interpolation=InterpolationMode.BILINEAR,
+            antialias=True,
+        )
+        mask = F.resize(mask, size=[new_h, new_w], interpolation=InterpolationMode.NEAREST)
 
-        x_max = img.width - crop_w
-        y_max = img.height - crop_h
-        x1 = random.randint(0, max(0, x_max))
-        y1 = random.randint(0, max(0, y_max))
-        img = img.crop((x1, y1, x1 + crop_w, y1 + crop_h))
-        mask = mask.crop((x1, y1, x1 + crop_w, y1 + crop_h))
-        return img, mask
-
-    def _random_flip(self, img: Image.Image, mask: Image.Image):
-        if random.random() < 0.5:
-            img = img.transpose(Image.FLIP_LEFT_RIGHT)
-            mask = mask.transpose(Image.FLIP_LEFT_RIGHT)
         return img, mask

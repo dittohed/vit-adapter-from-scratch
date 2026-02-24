@@ -85,16 +85,16 @@ class SemanticFPNHead(nn.Module):
     def __init__(
         self,
         in_channels: List[int],
-        channels: int = 256,
-        semantic_channels: int = 128,
+        fpn_out_channels: int = 256,  # No. of "vanilla" FPN output channels
+        semantic_out_channels: int = 128,  # No. of "semantic" FPN output channels
         num_classes: int = 150,
         dropout: float = 0.0,
     ):
         super().__init__()
 
-        self.fpn = FPN(in_channels=in_channels, out_channels=channels)
+        self.fpn = FPN(in_channels=in_channels, out_channels=fpn_out_channels)
         self.dropout = dropout
-        self.classifier = nn.Conv2d(semantic_channels, num_classes, kernel_size=1)
+        self.classifier = nn.Conv2d(semantic_out_channels, num_classes, kernel_size=1)
 
         # Build scale heads
         self.scale_heads = nn.ModuleList()  # Each head produces 128 channels at 1/4 scale from a single FPN level
@@ -105,23 +105,23 @@ class SemanticFPNHead(nn.Module):
             if i == 0:
                 layers.extend(
                     [
-                        nn.Conv2d(channels, semantic_channels, kernel_size=3, padding=1, bias=False),
-                        _gn(semantic_channels),
+                        nn.Conv2d(fpn_out_channels, semantic_out_channels, kernel_size=3, padding=1, bias=False),
+                        _gn(semantic_out_channels),
                         nn.ReLU(inplace=True),
                     ]
                 )
             else:
-                in_ch = channels
+                in_ch = fpn_out_channels
                 for _ in range(i):
                     layers.extend(
                         [
-                            nn.Conv2d(in_ch, semantic_channels, kernel_size=3, padding=1, bias=False),
-                            _gn(semantic_channels),
+                            nn.Conv2d(in_ch, semantic_out_channels, kernel_size=3, padding=1, bias=False),
+                            _gn(semantic_out_channels),
                             nn.ReLU(inplace=True),
                             nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
                         ]
                     )
-                    in_ch = semantic_channels
+                    in_ch = semantic_out_channels
 
             self.scale_heads.append(nn.Sequential(*layers))
 
