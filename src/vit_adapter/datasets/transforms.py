@@ -27,7 +27,13 @@ class SegmentationTransform:
             raise ValueError("mode must be 'train' or 'val'")
 
         self.mode = mode
+
+        # Train uses square random crops. Val follows the common ADE20K recipe:
+        # resize shorter side to `crop_size` (keep aspect ratio), then pad to a divisor.
         self.crop_size = (crop_size, crop_size)
+        self.val_short_side = int(crop_size)
+        self.val_pad_divisor = 32
+
         self.scale_range = scale_range
         self.ignore_index = ignore_index
 
@@ -50,13 +56,10 @@ class SegmentationTransform:
             img_t, mask_t = self.crop(img_t, mask_t)
             img_t, mask_t = self.flip(img_t, mask_t)
         else:
-            img_t = F.resize(
-                img_t,
-                size=list(self.crop_size),
-                interpolation=InterpolationMode.BILINEAR,
-                antialias=True,
-            )
-            mask_t = F.resize(mask_t, size=list(self.crop_size), interpolation=InterpolationMode.NEAREST)
+            # Paper-style testing: keep aspect ratio by resizing the shorter side,
+            # then pad to a multiple of 32 for the backbone / pyramid.
+            img_t, mask_t = self._resize_shorter_side(img_t, mask_t, short_side=self.val_short_side)
+            img_t, mask_t = self._pad_to_divisor(img_t, mask_t, divisor=self.val_pad_divisor)
 
         img_t = self.normalize(self.to_dtype(img_t))
         img_t = self.to_pure(img_t)
@@ -79,4 +82,43 @@ class SegmentationTransform:
         )
         mask = F.resize(mask, size=[new_h, new_w], interpolation=InterpolationMode.NEAREST)
 
+        return img, mask
+
+    def _resize_shorter_side(
+        self, img: tv_tensors.Image, mask: tv_tensors.Mask, short_side: int
+    ) -> tuple[tv_tensors.Image, tv_tensors.Mask]:
+        h, w = int(img.shape[-2]), int(img.shape[-1])
+        short = min(h, w)
+
+        if short == short_side:
+            return img, mask
+
+        scale = float(short_side) / float(short)
+        new_h = int(round(h * scale))
+        new_w = int(round(w * scale))
+
+        img = F.resize(
+            img,
+            size=[new_h, new_w],
+            interpolation=InterpolationMode.BILINEAR,
+            antialias=True,
+        )
+        mask = F.resize(mask, size=[new_h, new_w], interpolation=InterpolationMode.NEAREST)
+
+        return img, mask
+
+    def _pad_to_divisor(
+        self, img: tv_tensors.Image, mask: tv_tensors.Mask, divisor: int
+    ) -> tuple[tv_tensors.Image, tv_tensors.Mask]:
+        h, w = int(img.shape[-2]), int(img.shape[-1])
+        pad_h = (divisor - (h % divisor)) % divisor
+        pad_w = (divisor - (w % divisor)) % divisor
+
+        if pad_h == 0 and pad_w == 0:
+            return img, mask
+
+        padding = [0, 0, pad_w, pad_h]  # left, top, right, bottom
+        img = F.pad(img, padding=padding, fill=0)
+        mask = F.pad(mask, padding=padding, fill=int(self.ignore_index))
+        
         return img, mask

@@ -4,4 +4,4 @@ timm
 lightning
 numpy
 pillow
-tensorboard
+wandb

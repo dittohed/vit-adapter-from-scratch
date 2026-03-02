@@ -17,17 +17,20 @@ from vit_adapter.utils.metrics import compute_miou, compute_confusion_matrix
 try:
     import lightning.pytorch as pl
     from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
-    from lightning.pytorch.loggers import TensorBoardLogger
+    from lightning.pytorch.loggers import WandbLogger
 except ImportError:  # pragma: no cover
     import pytorch_lightning as pl
     from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
-    from pytorch_lightning.loggers import TensorBoardLogger
+    from pytorch_lightning.loggers import WandbLogger
 
 
 def parse_args():
     parser = argparse.ArgumentParser("ViT-Adapter ADE20K training (PyTorch Lightning)")
     parser.add_argument("--data-root", type=str, default="local/datasets/ADEChallengeData2016", help="ADE20K root with images/ and annotations/")
     parser.add_argument("--work-dir", type=str, default="./local/work_dir")
+    parser.add_argument("--wandb-project", type=str, default="vit-adapter-ade20k")
+    parser.add_argument("--wandb-name", type=str, default="")
+    parser.add_argument("--wandb-offline", action="store_true", default=False)
 
     parser.add_argument("--vit-name", type=str, default="deit_small_patch16_224")
     parser.add_argument("--no-vit-pretrained", dest="vit_pretrained", action="store_false")
@@ -43,21 +46,19 @@ def parse_args():
     parser.add_argument("--no-reduce-zero-label", dest="reduce_zero_label", action="store_false")
     parser.add_argument("--ignore-index", type=int, default=255)
 
-    parser.add_argument("--batch-size", type=int, default=2, help="Per-device batch size")
+    parser.add_argument("--batch-size", type=int, default=4, help="Per-device batch size")
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
 
-    # Optimization / schedule (mirrors common mmseg-style poly schedule).
-    parser.add_argument("--lr", type=float, default=6e-5)
+    parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=0.05)
-    parser.add_argument("--layer-decay", type=float, default=0.9)
     parser.add_argument("--warmup-iters", type=int, default=1500)
-    parser.add_argument("--power", type=float, default=1.0)
+    parser.add_argument("--power", type=float, default=0.9)
 
-    parser.add_argument("--max-iters", type=int, default=160000, help="Max optimizer steps")
+    parser.add_argument("--max-iters", type=int, default=80000, help="Max optimizer steps")
     parser.add_argument("--epochs", type=int, default=160, help="Trainer max epochs (max-iters usually stops first)")
     parser.add_argument("--accum-steps", type=int, default=1)
-    parser.add_argument("--grad-clip", type=float, default=1.0)
+    parser.add_argument("--grad-clip", type=float, default=0.0)
     parser.add_argument("--amp", action="store_true", default=False)
 
     parser.add_argument("--eval-interval", type=int, default=8000, help="Validate every N train batches")
@@ -75,26 +76,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def get_layer_id_for_vit(param_name: str, num_layers: int) -> int:
-    # Allow the segmentation model to be nested under a LightningModule attribute, e.g. "model.backbone.vit...".
-    if param_name.startswith("model."):
-        param_name = param_name[len("model.") :]
-
-    if param_name.startswith("backbone.vit.patch_embed"):
-        return 0
-    if param_name.startswith("backbone.vit.pos_embed") or param_name.startswith("backbone.vit.cls_token"):
-        return 0
-    if param_name.startswith("backbone.vit.blocks"):
-        parts = param_name.split(".")
-        if len(parts) > 3 and parts[3].isdigit():
-            return int(parts[3]) + 1
-    if param_name.startswith("backbone.vit.norm"):
-        return num_layers + 1
-    return num_layers + 1
-
-
-def build_param_groups(model: SegmentationModel, base_lr: float, weight_decay: float, layer_decay: float):
-    num_layers = model.backbone.depth
+def build_param_groups(model: SegmentationModel, base_lr: float, weight_decay: float):
     groups = {}
 
     for name, param in model.named_parameters():
@@ -106,41 +88,32 @@ def build_param_groups(model: SegmentationModel, base_lr: float, weight_decay: f
         else:
             decay = weight_decay
 
-        norm_name = name[len("model.") :] if name.startswith("model.") else name
-        if norm_name.startswith("backbone.vit"):
-            layer_id = get_layer_id_for_vit(name, num_layers)
-            lr_scale = layer_decay ** (num_layers + 1 - layer_id)
-        else:
-            lr_scale = 1.0
-
-        key = (decay, lr_scale)
-        if key not in groups:
-            groups[key] = {
+        if decay not in groups:
+            groups[decay] = {
                 "params": [],
                 "weight_decay": decay,
-                "lr_scale": lr_scale,
             }
-        groups[key]["params"].append(param)
+        
+        groups[decay]["params"].append(param)
 
     return [
         {
             "params": g["params"],
             "weight_decay": g["weight_decay"],
-            "lr": base_lr * g["lr_scale"],
-            "lr_scale": g["lr_scale"],
+            "lr": base_lr,
         }
         for g in groups.values()
     ]
 
 
 def poly_warmup_factor(step: int, total_steps: int, warmup_steps: int, power: float) -> float:
-    # Uses (step + 1) so the first optimizer step has a small but non-zero LR.
-    step = step + 1
+    step = step + 1  # So the first optimizer step has a small but non-zero LR
+
     if warmup_steps > 0 and step < warmup_steps:
-        return float(step) / float(max(1, warmup_steps))
-    if total_steps <= warmup_steps:
-        return 1.0
-    progress = float(step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+        return step / warmup_steps
+    
+    progress = (step - warmup_steps) / (total_steps - warmup_steps)
+
     return (1.0 - progress) ** power
 
 
@@ -217,7 +190,6 @@ class SegLightningModule(pl.LightningModule):
         ignore_index: int,
         lr: float,
         weight_decay: float,
-        layer_decay: float,
         warmup_iters: int,
         max_iters: int,
         power: float,
@@ -228,13 +200,18 @@ class SegLightningModule(pl.LightningModule):
         self.ignore_index = ignore_index
         self.lr = lr
         self.weight_decay = weight_decay
-        self.layer_decay = layer_decay
         self.warmup_iters = warmup_iters
         self.max_iters = max_iters
         self.power = power
 
         self.criterion = nn.CrossEntropyLoss(ignore_index=ignore_index)
-        self.val_cm = torch.zeros((num_classes, num_classes), dtype=torch.int64)
+        # Register mIoU confusion matrix as a buffer so Lightning moves it
+        # with the module across devices
+        self.register_buffer(
+            "val_cm",
+            torch.zeros((num_classes, num_classes), dtype=torch.int64),
+            persistent=False,
+        )
 
         self.save_hyperparameters(ignore=["model"])
 
@@ -257,13 +234,18 @@ class SegLightningModule(pl.LightningModule):
         self.val_cm += compute_confusion_matrix(preds, masks, self.num_classes, self.ignore_index)
 
     def on_validation_epoch_end(self):
-        miou, _ = compute_miou(self.val_cm)
+        # Aggregate the confusion matrices across ranks before computing mIoU
+        cm = self.val_cm
+        if getattr(self.trainer, "world_size", 1) > 1:
+            cm = self.all_gather(cm).sum(dim=0)
+
+        miou, _ = compute_miou(cm)
         self.log("val_miou", miou, prog_bar=True, sync_dist=False)
         self.val_cm.zero_()
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
-            build_param_groups(self.model, self.lr, self.weight_decay, self.layer_decay),
+            build_param_groups(self.model, self.lr, self.weight_decay),
             lr=self.lr,
             betas=(0.9, 0.999),
         )
@@ -329,13 +311,18 @@ def main():
         ignore_index=args.ignore_index,
         lr=args.lr,
         weight_decay=args.weight_decay,
-        layer_decay=args.layer_decay,
         warmup_iters=args.warmup_iters,
         max_iters=args.max_iters,
         power=args.power,
     )
 
-    logger = TensorBoardLogger(save_dir=args.work_dir, name="tb")
+    logger = WandbLogger(
+        project=args.wandb_project,
+        name=args.wandb_name if args.wandb_name else None,
+        save_dir=args.work_dir,
+        offline=args.wandb_offline,
+        log_model=False,
+    )
     ckpt_dir = os.path.join(args.work_dir, "checkpoints")
     ckpt_cb = ModelCheckpoint(
         dirpath=ckpt_dir,
@@ -350,25 +337,20 @@ def main():
     if accelerator == "cpu" and args.amp:
         print("NOTE: --amp is not supported on CPU; falling back to full precision (32-bit).")
     precision = "16-mixed" if (args.amp and accelerator != "cpu") else 32
-    # Ensure val_check_interval doesn't exceed the number of train batches per epoch.
-    dm.setup("fit")
-    steps_per_epoch = len(dm.train_dataloader())
-    if args.eval_interval <= 0:
-        val_check_interval = 1.0
-    else:
-        val_check_interval = min(args.eval_interval, max(1, steps_per_epoch), max(1, args.max_iters))
 
     trainer = pl.Trainer(
         default_root_dir=args.work_dir,
         accelerator=accelerator,
         devices=args.devices,
+        strategy="ddp" if (accelerator == "gpu" and args.devices > 1) else "auto",
+        sync_batchnorm=True if (accelerator == "gpu" and args.devices > 1) else False,
         max_steps=args.max_iters,
         max_epochs=args.epochs,
         accumulate_grad_batches=args.accum_steps,
-        gradient_clip_val=args.grad_clip if args.grad_clip > 0 else 0.0,
+        gradient_clip_val=args.grad_clip,
         precision=precision,
         log_every_n_steps=args.log_interval,
-        val_check_interval=val_check_interval,
+        val_check_interval=args.eval_interval,
         logger=logger,
         callbacks=[ckpt_cb, lr_cb],
         enable_checkpointing=True,

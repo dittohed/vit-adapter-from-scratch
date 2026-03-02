@@ -295,7 +295,7 @@ class ViTAdapterBackbone(nn.Module):
         if pos_embed.shape[1] == self.vit.patch_embed.num_patches + 1:
             pos_embed = pos_embed[:, 1:]
         
-        # Interpolate classical ViT positional embeddings for higher resolution
+        # Interpolate classical ViT learnable positional embeddings to higher resolution
         pos_embed = self._resize_pos_embed(pos_embed, h, w)
         return pos_embed.to(device)
 
