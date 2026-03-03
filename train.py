@@ -48,7 +48,6 @@ def parse_args():
     parser.add_argument("--power", type=float, default=0.9)
 
     parser.add_argument("--max-iters", type=int, default=80000, help="Max optimizer steps")
-    parser.add_argument("--epochs", type=int, default=160, help="Trainer max epochs (max-iters usually stops first)")
     parser.add_argument("--accum-steps", type=int, default=1)
     parser.add_argument("--grad-clip", type=float, default=0.0)
     parser.add_argument("--amp", action="store_true", default=False)
@@ -65,7 +64,7 @@ def parse_args():
         help="Device backend (use 'cpu' for quick debugging even if GPUs are available)",
     )
     parser.add_argument("--devices", type=int, default=1, help="Number of devices to use (usually 1 for debugging)")
-    
+
     return parser.parse_args()
 
 
@@ -151,7 +150,6 @@ def main():
         strategy="ddp" if (accelerator == "gpu" and args.devices > 1) else "auto",
         sync_batchnorm=True if (accelerator == "gpu" and args.devices > 1) else False,
         max_steps=args.max_iters,
-        max_epochs=args.epochs,
         accumulate_grad_batches=args.accum_steps,
         gradient_clip_val=args.grad_clip,
         precision=precision,
