@@ -1,11 +1,14 @@
 from typing import List, Tuple
 from pathlib import Path
 
+import lightning.pytorch as pl
 import numpy as np
 from PIL import Image
 from torch.utils.data import Dataset
+from torch.utils.data import DataLoader
 
 from vit_adapter.datasets.transforms import SegmentationTransform
+from vit_adapter.utils.utils import DataConfig
 
 
 class ADE20K(Dataset):
@@ -71,3 +74,55 @@ class ADE20K(Dataset):
             img, mask = self.transform(img, mask)
 
         return img, mask
+    
+
+class ADE20KDataModule(pl.LightningDataModule):
+    def __init__(self, cfg: DataConfig):
+        super().__init__()
+        self.cfg = cfg
+        self.train_dataset = None
+        self.val_dataset = None
+
+    def setup(self, stage=None):
+        train_tf = SegmentationTransform(
+            mode="train",
+            crop_size=self.cfg.crop_size,
+            scale_range=(self.cfg.scale_min, self.cfg.scale_max),
+            ignore_index=self.cfg.ignore_index,
+        )
+        val_tf = SegmentationTransform(
+            mode="val",
+            crop_size=self.cfg.crop_size,
+            ignore_index=self.cfg.ignore_index,
+        )
+        self.train_dataset = ADE20K(
+            self.cfg.data_root,
+            split="train",
+            transform=train_tf,
+            reduce_zero_label=self.cfg.reduce_zero_label,
+        )
+        self.val_dataset = ADE20K(
+            self.cfg.data_root,
+            split="val",
+            transform=val_tf,
+            reduce_zero_label=self.cfg.reduce_zero_label,
+        )
+
+    def train_dataloader(self):
+        return DataLoader(
+            self.train_dataset,
+            batch_size=self.cfg.batch_size,
+            shuffle=True,
+            num_workers=self.cfg.num_workers,
+            pin_memory=self.cfg.pin_memory,
+            drop_last=True,
+        )
+
+    def val_dataloader(self):
+        return DataLoader(
+            self.val_dataset,
+            batch_size=1,
+            shuffle=False,
+            num_workers=self.cfg.num_workers,
+            pin_memory=self.cfg.pin_memory,
+        )
