@@ -1,12 +1,11 @@
 import argparse
 import os
+from dotenv import load_dotenv
 
 import torch
-
 import lightning.pytorch as pl
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
-
 
 from vit_adapter.datasets.ade20k import ADE20KDataModule
 from vit_adapter.models.segmentation_model import SegmentationModel, SegLightningModule
@@ -20,6 +19,7 @@ def parse_args():
     parser = argparse.ArgumentParser("ViT-Adapter ADE20K training (PyTorch Lightning)")
     parser.add_argument("--data-root", type=str, default="local/datasets/ADEChallengeData2016", help="ADE20K root with images/ and annotations/")
     parser.add_argument("--work-dir", type=str, default="./local/work_dir")
+
     parser.add_argument("--wandb-project", type=str, default="vit-adapter-ade20k")
     parser.add_argument("--wandb-name", type=str, default="")
     parser.add_argument("--wandb-offline", action="store_true", default=False)
@@ -65,10 +65,13 @@ def parse_args():
         help="Device backend (use 'cpu' for quick debugging even if GPUs are available)",
     )
     parser.add_argument("--devices", type=int, default=1, help="Number of devices to use (usually 1 for debugging)")
+    
     return parser.parse_args()
 
 
 def main():
+    load_dotenv()
+    
     args = parse_args()
     os.makedirs(args.work_dir, exist_ok=True)
 
