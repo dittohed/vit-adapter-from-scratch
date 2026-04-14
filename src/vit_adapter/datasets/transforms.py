@@ -23,8 +23,8 @@ class SegmentationTransform:
         std: tuple[float, float, float] = IMAGENET_STD,
         ignore_index: int = 255,
     ):
-        if mode not in {"train", "val"}:
-            raise ValueError("mode must be 'train' or 'val'")
+        if mode not in {"train", "val", "overfit"}:
+            raise ValueError("mode must be 'train', 'val', or 'overfit'")
 
         self.mode = mode
 
@@ -42,6 +42,7 @@ class SegmentationTransform:
             pad_if_needed=True,
             fill={tv_tensors.Image: 0, tv_tensors.Mask: int(ignore_index)},
         )
+        self.center_crop = T.CenterCrop(size=self.crop_size)
         self.flip = T.RandomHorizontalFlip(p=0.5)
         self.to_dtype = T.ToDtype(torch.float32, scale=True)
         self.normalize = T.Normalize(mean=mean, std=std)
@@ -55,6 +56,9 @@ class SegmentationTransform:
             img_t, mask_t = self._random_scale(img_t, mask_t)
             img_t, mask_t = self.crop(img_t, mask_t)
             img_t, mask_t = self.flip(img_t, mask_t)
+        elif self.mode == "overfit":
+            img_t, mask_t = self._pad_to_at_least(img_t, mask_t, *self.crop_size)
+            img_t, mask_t = self.center_crop(img_t, mask_t)
         else:
             # Paper-style testing: keep aspect ratio by resizing the shorter side,
             # then pad to a multiple of 32 for the backbone / pyramid.
@@ -120,5 +124,21 @@ class SegmentationTransform:
         padding = [0, 0, pad_w, pad_h]  # left, top, right, bottom
         img = F.pad(img, padding=padding, fill=0)
         mask = F.pad(mask, padding=padding, fill=int(self.ignore_index))
+
+        return img, mask
+
+    def _pad_to_at_least(
+        self, img: tv_tensors.Image, mask: tv_tensors.Mask, min_h: int, min_w: int
+    ) -> tuple[tv_tensors.Image, tv_tensors.Mask]:
+        h, w = int(img.shape[-2]), int(img.shape[-1])
+        pad_h = max(0, min_h - h)
+        pad_w = max(0, min_w - w)
+
+        if pad_h == 0 and pad_w == 0:
+            return img, mask
         
+        padding = [0, 0, pad_w, pad_h]  # left, top, right, bottom
+        img = F.pad(img, padding=padding, fill=0)
+        mask = F.pad(mask, padding=padding, fill=int(self.ignore_index))
+
         return img, mask

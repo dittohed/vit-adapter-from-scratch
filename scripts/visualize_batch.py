@@ -8,7 +8,8 @@ import torch
 from torchvision.utils import save_image
 
 from vit_adapter.datasets.ade20k import ADE20K
-from vit_adapter.datasets.transforms import IMAGENET_MEAN, IMAGENET_STD, SegmentationTransform
+from vit_adapter.datasets.transforms import SegmentationTransform
+from vit_adapter.utils.visualization import denormalize, make_palette, colorize_mask
 
 
 def parse_args():
@@ -24,38 +25,6 @@ def parse_args():
     p.add_argument("--no-reduce-zero-label", dest="reduce_zero_label", action="store_false")
     p.add_argument("--out-dir", type=Path, default="./local/work_dir/viz")
     return p.parse_args()
-
-
-def denormalize(img_chw: torch.Tensor) -> torch.Tensor:
-    mean = torch.tensor(IMAGENET_MEAN, device=img_chw.device).view(3, 1, 1)
-    std = torch.tensor(IMAGENET_STD, device=img_chw.device).view(3, 1, 1)
-    return (img_chw * std + mean).clamp(0, 1)
-
-
-def make_palette(size: int, black_index: int) -> torch.Tensor:
-    """
-    Create a color palette for visualizing segmentation masks. 
-
-    The palette is deterministic and assigns a unique color to each class index, 
-    except for the specified `black_index` which is set to black (0,0,0).
-    """
-
-    idx = torch.arange(size, dtype=torch.int64) + 1  # Offset so class 0 isn't black by default
-    pal = torch.stack([(idx * 37) % 255, (idx * 17) % 255, (idx * 29) % 255], dim=1).float() / 255.0
-    pal[black_index] = 0.0
-
-    return pal
-
-
-def colorize_mask(mask_hw: torch.Tensor, palette: torch.Tensor) -> torch.Tensor:
-    """
-    Convert a segmentation mask ([H,W] int64) with class indices to 
-    an RGB image ([3,H,W] float) using the provided palette.
-    """
-
-    mask_hw = mask_hw.clamp(0, palette.shape[0] - 1)
-    h, w = mask_hw.shape
-    return palette[mask_hw.view(-1)].view(h, w, 3).permute(2, 0, 1).contiguous()
 
 
 def main():

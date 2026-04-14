@@ -4,8 +4,7 @@ from pathlib import Path
 import lightning.pytorch as pl
 import numpy as np
 from PIL import Image
-from torch.utils.data import Dataset
-from torch.utils.data import DataLoader
+from torch.utils.data import Dataset, DataLoader, Subset
 
 from vit_adapter.datasets.transforms import SegmentationTransform
 from vit_adapter.utils.utils import DataConfig
@@ -85,7 +84,7 @@ class ADE20KDataModule(pl.LightningDataModule):
 
     def setup(self, stage=None):
         train_tf = SegmentationTransform(
-            mode="train",
+            mode="overfit" if self.cfg.overfit_to_batch else "train",
             crop_size=self.cfg.crop_size,
             scale_range=(self.cfg.scale_min, self.cfg.scale_max),
             ignore_index=self.cfg.ignore_index,
@@ -100,6 +99,10 @@ class ADE20KDataModule(pl.LightningDataModule):
             split="train",
             transform=train_tf,
             reduce_zero_label=self.cfg.reduce_zero_label,
+        )
+        self.train_dataset = (
+            Subset(self.train_dataset, list(range(self.cfg.batch_size))) 
+            if self.cfg.overfit_to_batch else self.train_dataset
         )
         self.val_dataset = ADE20K(
             self.cfg.data_root,

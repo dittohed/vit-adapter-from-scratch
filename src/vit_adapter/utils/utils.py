@@ -55,3 +55,4 @@ class DataConfig:
     batch_size: int
     num_workers: int
     pin_memory: bool
+    overfit_to_batch: bool

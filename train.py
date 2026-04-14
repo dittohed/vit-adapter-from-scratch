@@ -12,6 +12,7 @@ from vit_adapter.models.segmentation_model import SegmentationModel, SegLightnin
 from vit_adapter.models.vit_adapter import ViTAdapterBackbone
 from vit_adapter.models.upernet import UperNetHead
 from vit_adapter.models.semantic_fpn import SemanticFPNHead
+from vit_adapter.callbacks.visualization import VisualizationCallback
 from vit_adapter.utils.utils import DataConfig
 
 
@@ -54,7 +55,9 @@ def parse_args():
 
     parser.add_argument("--eval-interval", type=int, default=8000, help="Validate every N train batches")
     parser.add_argument("--log-interval", type=int, default=50)
+    parser.add_argument("--vis-interval", type=int, default=0, help="Log input/GT/pred images to WandB every N steps (0=disabled)")
     parser.add_argument("--resume", type=str, default="", help="Path to a Lightning .ckpt to resume from")
+    parser.add_argument("--overfit-to-batch", action="store_true", help="Overfit to a single batch (for debugging)")
 
     parser.add_argument(
         "--accelerator",
@@ -89,6 +92,7 @@ def main():
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         pin_memory=pin_memory,
+        overfit_to_batch=args.overfit_to_batch,
     )
     dm = ADE20KDataModule(data_cfg)
 
@@ -139,6 +143,16 @@ def main():
     )
     lr_cb = LearningRateMonitor(logging_interval="step")
 
+    callbacks = [ckpt_cb, lr_cb]
+    if args.vis_interval > 0:
+        vis_cb = VisualizationCallback(
+            every_n_steps=args.vis_interval,
+            num_classes=args.num_classes,
+            ignore_index=args.ignore_index,
+            max_samples=min(4, args.batch_size),
+        )
+        callbacks.append(vis_cb)
+
     if accelerator == "cpu" and args.amp:
         print("NOTE: --amp is not supported on CPU; falling back to full precision (32-bit).")
     precision = "16-mixed" if (args.amp and accelerator != "cpu") else 32
@@ -156,8 +170,10 @@ def main():
         log_every_n_steps=args.log_interval,
         val_check_interval=args.eval_interval,
         logger=logger,
-        callbacks=[ckpt_cb, lr_cb],
+        callbacks=callbacks,
         enable_checkpointing=True,
+        limit_val_batches=0 if args.overfit_to_batch else 1.0,
+        num_sanity_val_steps=0 if args.overfit_to_batch else 2,
     )
 
     ckpt_path = args.resume if args.resume else None
